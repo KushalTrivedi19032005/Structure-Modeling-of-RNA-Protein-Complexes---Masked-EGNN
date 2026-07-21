@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python code/model.py)",
+      "Bash(python -c \"import json;d=json.load\\(open\\('../.cache_cifs/_index.json'\\)\\);print\\(sorted\\(d\\)\\);print\\('11gi ->', d['11gi']\\)\")",
+      "Bash(python dataset.py --no_cuda --pdb_zip \"../PDB.zip.zip\" --af_zip \"../AlphaFold.zip.zip\" --cache_dir \"../.cache_cifs\" --names 11gi)",
+      "Bash(python dataset.py --no_cuda)",
+      "Bash(unzip -Z1 PDB.zip.zip)",
+      "Bash(python main.py --no_cuda --epochs 1 --mask_schedule 0.10 --names 21we 11gi)"
+    ]
+  }
+}

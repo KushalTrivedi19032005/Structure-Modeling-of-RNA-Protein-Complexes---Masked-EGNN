@@ -1,0 +1,13 @@
+numpy
+pandas
+gemmi
+tqdm
+torch
+networkx
+scikit-learn
+matplotlib
+networkx
+argparse
+fair-esm==2.0.0
+biopython
+ptflops
