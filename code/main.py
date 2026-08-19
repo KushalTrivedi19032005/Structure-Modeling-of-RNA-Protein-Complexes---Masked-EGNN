@@ -10,8 +10,8 @@ from dataloader import build_train_val_dataset, make_train_loader
 from evaluate import evaluate
 
 
-def run_trial(args, data_loader, dataset, val_idx, device, radius, n_layers):
-    """Train one model at a single (radius, n_layers) setting.
+def run_trial(args, data_loader, dataset, val_idx, device, radius, n_layers, mask_fraction):
+    """Train one model at a single (radius, n_layers, mask_fraction) setting.
 
     Returns the best epoch's stats, with the best weights loaded back into the
     model before it is handed back.
@@ -38,8 +38,12 @@ def run_trial(args, data_loader, dataset, val_idx, device, radius, n_layers):
 
     # Per-step lr schedule: linear warmup over the first `warmup_frac` of all
     # optimizer steps, then cosine decay to 0 over the remainder. Stepped once
-    # per optimizer step inside train_epoch (not per epoch).
-    total_steps = max(1, len(data_loader) * args.epochs)
+    # per optimizer step inside train_epoch (not per epoch). With gradient
+    # accumulation there is one optimizer step per `accum_steps` micro-batches,
+    # so count steps in optimizer steps, not micro-batches.
+    accum_steps = max(1, getattr(args, 'accum_steps', 1))
+    steps_per_epoch = max(1, math.ceil(len(data_loader) / accum_steps))
+    total_steps = max(1, steps_per_epoch * args.epochs)
     warmup_steps = max(1, int(args.warmup_frac * total_steps))
 
     def lr_lambda(step):
@@ -52,7 +56,6 @@ def run_trial(args, data_loader, dataset, val_idx, device, radius, n_layers):
     print(f"[sched] {total_steps} total steps, {warmup_steps} warmup "
           f"({100 * warmup_steps / total_steps:.0f}%), then cosine to 0")
 
-    schedule = args.mask_schedule
     best_gdt = -1.0        # checkpoint selection is on GDT-TS (higher is better)
     best_loss = float('inf')
     best_epoch = 0
@@ -61,8 +64,7 @@ def run_trial(args, data_loader, dataset, val_idx, device, radius, n_layers):
     epochs_without_improvement = 0
 
     for epoch in range(1, args.epochs + 1):
-        # Cycle the mask schedule over epochs: epoch1->10%, epoch2->20%, epoch3->30%, ...
-        mask_fraction = schedule[(epoch - 1) % len(schedule)]
+        # This run uses one fixed mask fraction for every epoch (swept in main()).
         stats = train_epoch(model, optimizer, data_loader, device, args, epoch,
                             mask_fraction=mask_fraction, scheduler=lr_scheduler)
 
@@ -103,7 +105,7 @@ def run_trial(args, data_loader, dataset, val_idx, device, radius, n_layers):
               f"(val GDT-TS {best_gdt:.4f}, train loss {best_loss:.4f})")
 
         os.makedirs(args.save_dir, exist_ok=True)
-        ckpt_path = os.path.join(args.save_dir, f"r{radius:g}_l{n_layers}.pt")
+        ckpt_path = os.path.join(args.save_dir, f"r{radius:g}_l{n_layers}_m{mask_fraction}.pt")
         torch.save({
             'state_dict': best_state,
             'radius': radius,
@@ -118,6 +120,7 @@ def run_trial(args, data_loader, dataset, val_idx, device, radius, n_layers):
     return {
         'radius': radius,
         'n_layers': n_layers,
+        'mask_fraction': mask_fraction,
         'best_epoch': best_epoch,
         'loss': best_loss,
         'val_gdt_ts': best_gdt,
@@ -134,9 +137,12 @@ def main():
 
     radii = args.radius
     depths = args.n_layers
-    print(f"[sweep] radius={radii} x n_layers={depths} => {len(radii) * len(depths)} run(s)")
+    mask_fractions = args.mask_fraction
+    n_runs = len(radii) * len(depths) * len(mask_fractions)
+    print(f"[sweep] radius={radii} x n_layers={depths} x mask_fraction={mask_fractions} "
+          f"=> {n_runs} run(s)")
     print(f"[loss]  lambdas: {lambdas_from_args(args)}")
-    print(f"[train] {args.epochs} epoch(s) on {device}, mask schedule={args.mask_schedule}")
+    print(f"[train] {args.epochs} epoch(s) on {device}, mask fraction(s)={mask_fractions}")
     if args.patience > 0:
         print(f"[train] early stopping: patience={args.patience} epoch(s), min_delta={args.min_delta}")
 
@@ -152,9 +158,11 @@ def main():
               f"{train_nodes} nodes; {len(val_idx)} held out for validation")
 
         for n_layers in depths:
-            print(f"\n=== trial: radius={radius}A, n_layers={n_layers} ===")
-            results.append(run_trial(args, data_loader, dataset, val_idx,
-                                     device, radius, n_layers))
+            for mask_fraction in mask_fractions:
+                print(f"\n=== trial: radius={radius}A, n_layers={n_layers}, "
+                      f"mask_fraction={mask_fraction} ===")
+                results.append(run_trial(args, data_loader, dataset, val_idx,
+                                         device, radius, n_layers, mask_fraction))
 
     # Selection is on the VALIDATION GDT-TS -- a held-out generalisation estimate.
     # The final test set is supplied separately; run test.py on the winner for the

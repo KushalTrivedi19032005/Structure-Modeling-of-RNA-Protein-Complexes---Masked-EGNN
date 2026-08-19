@@ -7,10 +7,10 @@ from utils import (
     CA_ANGLE_MIN, CA_ANGLE_MAX,
     INTERFACE_CUTOFF,
     CHAIN_PROTEIN, CHAIN_RNA,
+    CLASH_SEQ_SEP,
     pairwise_distances,
     consecutive_distances,
     virtual_angles,
-    build_clash_mask,
     vdw_radii,
 )
 
@@ -193,33 +193,54 @@ def _angle_hinge_loss(x: torch.Tensor, chain_id: torch.Tensor,
 
 def _clash_loss(x: torch.Tensor, chain_id: torch.Tensor,
                 seq_index: torch.Tensor,
-                restrict_to: Optional[torch.Tensor] = None) -> torch.Tensor:
+                restrict_to: Optional[torch.Tensor] = None,
+                block: int = 1024) -> torch.Tensor:
     """Hinge on pairwise distances vs vdW-sum, over non-bonded pairs.
+
+    Computed in row blocks of at most `block` nodes, so peak memory is
+    O(block * N) rather than the O(N^2) of a full distance/mask matrix. Only
+    near-contact pairs contribute a non-zero hinge, but every eligible pair is
+    still counted in the denominator -- the block loop reproduces the dense
+    formulation's value exactly (the mask is symmetric, so counting both
+    (i, j) and (j, i) in numerator and denominator cancels).
 
     Args:
         restrict_to: [N] bool, if provided only pairs where BOTH nodes satisfy
                      this mask are considered (used to split protein vs RNA).
+        block:       row-block size bounding peak memory.
     """
     n = x.size(0)
     if n < 2:
         return x.new_tensor(0.0)
 
-    d = pairwise_distances(x)
-    radii = vdw_radii(chain_id)
-    r_sum = radii.unsqueeze(0) + radii.unsqueeze(1)     # [N, N]
+    radii = vdw_radii(chain_id)                       # [N]
+    all_idx = torch.arange(n, device=x.device)
 
-    pair_mask = build_clash_mask(chain_id, seq_index)
-    if restrict_to is not None:
-        both = restrict_to.unsqueeze(0) & restrict_to.unsqueeze(1)
-        pair_mask = pair_mask & both
+    sq_overlap_sum = x.new_tensor(0.0)
+    pair_count = torch.zeros((), device=x.device)
+    for start in range(0, n, block):
+        end = min(start + block, n)
+        xb = x[start:end]                             # [b, 3]
 
-    if not pair_mask.any():
-        return x.new_tensor(0.0)
+        d = torch.cdist(xb, x)                        # [b, N]
+        r_sum = radii[start:end].unsqueeze(1) + radii.unsqueeze(0)  # [b, N]
 
-    overlap = F.relu(r_sum - d)
-    overlap = overlap * pair_mask.float()
-    # Mean over eligible pairs only.
-    return (overlap ** 2).sum() / pair_mask.sum().clamp(min=1)
+        # Eligible pairs: not self, and not same-chain neighbours within
+        # CLASH_SEQ_SEP in sequence -- the block slice of build_clash_mask.
+        rows = all_idx[start:end].unsqueeze(1)        # [b, 1] global row index
+        cols = all_idx.unsqueeze(0)                   # [1, N] global col index
+        same_chain = chain_id[start:end].unsqueeze(1) == chain_id.unsqueeze(0)
+        seq_diff = (seq_index[start:end].unsqueeze(1) - seq_index.unsqueeze(0)).abs()
+        too_close = same_chain & (seq_diff <= CLASH_SEQ_SEP)
+        mask = ~(too_close | (rows == cols))
+        if restrict_to is not None:
+            mask = mask & restrict_to[start:end].unsqueeze(1) & restrict_to.unsqueeze(0)
+
+        overlap = F.relu(r_sum - d) * mask.float()
+        sq_overlap_sum = sq_overlap_sum + (overlap ** 2).sum()
+        pair_count = pair_count + mask.sum()
+
+    return sq_overlap_sum / pair_count.clamp(min=1)
 
 
 def _contact_loss(x: torch.Tensor,

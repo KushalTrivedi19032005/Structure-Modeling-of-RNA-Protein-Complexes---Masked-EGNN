@@ -22,9 +22,16 @@ def pairwise_distances(x: torch.Tensor) -> torch.Tensor:
 
     Returns:
         [N, N] pairwise distances
+
+    Uses the ||a-b||^2 = ||a||^2 + ||b||^2 - 2 a.b identity so the only
+    materialised (and autograd-retained) tensors are [N, N], not the [N, N, 3]
+    broadcast difference a naive implementation keeps for backward. The
+    +1e-8 inside the sqrt keeps the gradient finite at zero distance, matching
+    the previous implementation's numerics.
     """
-    diff = x.unsqueeze(1) - x.unsqueeze(0)          # [N, N, 3]
-    return torch.sqrt((diff ** 2).sum(dim=-1) + 1e-8)
+    sq = (x * x).sum(dim=-1)                                  # [N]
+    d2 = sq.unsqueeze(1) + sq.unsqueeze(0) - 2.0 * (x @ x.T)  # [N, N]
+    return torch.sqrt(d2.clamp_min(0.0) + 1e-8)
 
 
 def consecutive_distances(x: torch.Tensor, chain_id: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

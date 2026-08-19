@@ -20,6 +20,13 @@ def get_args():
                         help='optimizer weight decay (default: 1e-16)')
     parser.add_argument('--batch_size', type=int, default=8, metavar='B',
                         help='number of graphs per batch (default: 8)')
+    parser.add_argument('--accum_steps', type=int, default=1, metavar='K',
+                        help='gradient-accumulation steps: run K micro-batches, summing '
+                             'gradients, before each optimizer step. Effective batch size = '
+                             'batch_size * K at the memory cost of one micro-batch. Prefer '
+                             'batch_size=1 with a larger K, since the O(N^2) geometry losses '
+                             'grow quadratically with the concatenated node count of a batch '
+                             '(default: 1)')
     parser.add_argument('--seed', type=int, default=42,
                         help='random seed (default: 42)')
     parser.add_argument('--patience', type=int, default=10,
@@ -30,8 +37,10 @@ def get_args():
                         help='disable CUDA even if available')
 
     # Masking / noise (the self-supervised objective)
-    parser.add_argument('--mask_fraction', type=float, default=0.15,
-                        help='fallback mask fraction if --mask_schedule is not used (default: 0.15)')
+    parser.add_argument('--mask_fraction', type=float, nargs='+', default=[0.15],
+                        help='mask fraction(s) to sweep; one full training run per value, held '
+                             'fixed for all epochs of that run (e.g. 0.1 0.2 trains fully at 0.1, '
+                             'then fully at 0.2) (default: 0.15)')
     parser.add_argument('--mask_schedule', type=float, nargs='+', default=[0.10],
                         help='per-epoch mask fractions, cycled over epochs (default: 0.10 0.20 0.30)')
     parser.add_argument('--noise_std', type=float, nargs=2, default=[1.0, 3.0],
@@ -178,6 +187,21 @@ def train_epoch(model, optimizer, data_loader, device, args, epoch,
     # accumulate each loss component for logging
     comp_sums = {}
 
+    # Gradient accumulation: sum grads over `accum_steps` micro-batches, then take
+    # one optimizer step. Keeps memory at one micro-batch while giving the update
+    # smoothing of a larger effective batch (batch_size * accum_steps).
+    accum_steps = max(1, getattr(args, 'accum_steps', 1))
+    optimizer.zero_grad(set_to_none=True)
+    accum_count = 0   # successful backwards since the last optimizer step
+
+    def _optimizer_step():
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        # Per-step lr schedule (linear warmup -> cosine decay), if provided.
+        if scheduler is not None:
+            scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
+
     pbar = tqdm(data_loader, desc=f"epoch {epoch}", leave=False)
     for graph in pbar:
         # --in_node_nf selects how many raw node features to feed; 0 means the
@@ -204,7 +228,6 @@ def train_epoch(model, optimizer, data_loader, device, args, epoch,
         masked_node_type, x_in, loss_mask = eg.mask_and_perturb(
             node_type, true_x, mask_fraction=mask_fraction, noise_std=args.noise_std)
 
-        optimizer.zero_grad()
         _, pred_x = model(h, x_in, edges, edge_attr, masked_node_type, edge_type,
                           lm_emb=lm_emb, chain_id=chain_id)
         losses = compute_loss(
@@ -220,17 +243,18 @@ def train_epoch(model, optimizer, data_loader, device, args, epoch,
 
         # A single pathological structure (e.g. a poor alignment placing two
         # masked nodes almost coincident) can produce an exploding / non-finite
-        # gradient. Skip that step so it never writes inf/nan into the weights,
-        # and clip the gradient norm to keep the rest of training stable.
+        # gradient. Skip it so it never writes inf/nan into the weights (without
+        # discarding gradients already accumulated this window); the norm is
+        # clipped at each optimizer step to keep the rest of training stable.
         if not torch.isfinite(loss):
-            optimizer.zero_grad(set_to_none=True)
             continue
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        # Per-step lr schedule (linear warmup -> cosine decay), if provided.
-        if scheduler is not None:
-            scheduler.step()
+        # Scale by 1/accum_steps so the accumulated gradient equals the mean over
+        # the window, matching a single larger batch.
+        (loss / accum_steps).backward()
+        accum_count += 1
+        if accum_count == accum_steps:
+            _optimizer_step()
+            accum_count = 0
 
         # Metrics on the masked nodes.
         n_masked = int(loss_mask.sum())
@@ -248,6 +272,10 @@ def train_epoch(model, optimizer, data_loader, device, args, epoch,
             comp_sums[k] = comp_sums.get(k, 0.0) + float(v)
 
         pbar.set_postfix(loss=f"{loss.item():.4f}", masked=n_masked)
+
+    # Flush a partial final window so its gradients aren't dropped.
+    if accum_count > 0:
+        _optimizer_step()
 
     n_batches = max(len(data_loader), 1)
     avg_loss = running_loss / max(total_masked, 1)

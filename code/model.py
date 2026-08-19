@@ -124,7 +124,7 @@ class EGNN(nn.Module):
     def __init__(self, in_node_nf, hidden_nf, out_node_nf, in_edge_nf=0,
                  node_type_emb_nf=8, edge_type_emb_nf=8, n_node_types=3, n_edge_types=3,
                  device='cpu', act_fn=nn.SiLU(), n_layers=4, residual=True, attention=True, normalize=True, tanh=False,
-                 use_lm_emb=False, lm_emb_dim=640, lm_proj_dim=128):
+                 use_lm_emb=False, lm_emb_dim=640, lm_proj_dim=256):
         '''
 
         :param in_node_nf: Number of *raw* features for 'h' at the input (excludes the node-type embedding)
