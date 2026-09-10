@@ -5,7 +5,7 @@
 
 ## Brief Overview
 
-The Protein Data Bank has a total of 6340 RNA-Protein structures whose structures are reported, either partially or completely known. However, not all of these structures could be used for our study due to limitations such as missing residues in the sequence, computational limitations of state-of-the-art models, and the presence of pyrrolysine and selenocysteine in the sequences, which cannot be processed by known models as they form a minority fraction of the total sequences.
+The Protein Data Bank has a total of 6340 RNA-Protein structures whose structures are reported, either partially or completely known. However, a majority fraction of these structures are only partially known due to limitations such as missing residues in the sequence, computational limitations of state-of-the-art models, and the presence of pyrrolysine and selenocysteine in the sequences, which cannot be processed by known models as they form a minority fraction of the total sequences.
 
 One important RNA-Protein complex is the Microprocessor complex (PDB IDs: 9ASM, 9ASN, 9ASO, 9ASP, 9ASQ), which helps in microRNA biogenesis. Despite its significance, its structure is still unresolved and is notoriously difficult to predict because of lesser-known homologues and a significantly large missing segment (57.2%) across 4 unique chains (DROSHA, DGCR8, SRSF3, and Pri-let-7f1).
 
